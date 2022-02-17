@@ -15,6 +15,7 @@
 #include "table/block_based/block_based_table_builder.h"
 #include "table/sst_file_writer_collectors.h"
 #include "test_util/sync_point.h"
+#include "db/output_validator.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -40,7 +41,8 @@ struct SstFileWriter::Rep {
         cfh(_cfh),
         invalidate_page_cache(_invalidate_page_cache),
         skip_filters(_skip_filters),
-        db_session_id(_db_session_id) {}
+        db_session_id(_db_session_id) {
+        }
 
   std::unique_ptr<WritableFileWriter> file_writer;
   std::unique_ptr<TableBuilder> builder;
@@ -62,6 +64,8 @@ struct SstFileWriter::Rep {
   bool skip_filters;
   std::string db_session_id;
   uint64_t next_file_number = 1;
+  std::unique_ptr<OutputValidator> kv_validator; 
+  std::unique_ptr<OutputValidator> tombstone_validator; 
 
   Status AddImpl(const Slice& user_key, const Slice& value,
                  ValueType value_type) {
@@ -89,6 +93,12 @@ struct SstFileWriter::Rep {
     ikey.Set(user_key, sequence_number, value_type);
 
     builder->Add(ikey.Encode(), value);
+    Status s = kv_validator->Add(ikey.Encode(), value);
+
+    if(!s.ok())
+    {
+      return s;
+    }
 
     // update file info
     file_info.num_entries++;
@@ -160,6 +170,11 @@ struct SstFileWriter::Rep {
 
     auto ikey_and_end_key = tombstone.Serialize();
     builder->Add(ikey_and_end_key.first.Encode(), ikey_and_end_key.second);
+    Status s = tombstone_validator->Add(ikey_and_end_key.first.Encode(), ikey_and_end_key.second);
+
+    if(!s.ok()){
+      return s;
+    }
 
     // update file info
     file_info.num_range_del_entries++;
@@ -231,6 +246,9 @@ Status SstFileWriter::Open(const std::string& file_path) {
   }
 
   sst_file->SetIOPriority(r->io_priority);
+
+  r->kv_validator = std::unique_ptr<OutputValidator>(new OutputValidator(r->internal_comparator, true, true));
+  r->tombstone_validator = std::unique_ptr<OutputValidator>(new OutputValidator(r->internal_comparator, true, true));
 
   CompressionType compression_type;
   CompressionOptions compression_opts;
